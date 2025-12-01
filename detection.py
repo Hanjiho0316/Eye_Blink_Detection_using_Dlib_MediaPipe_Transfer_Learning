@@ -7,6 +7,7 @@ from torchvision import models
 import dlib
 import mediapipe as mp
 import math
+import time # ⚠️ time 모듈 추가
 # 사운드 재생을 위한 라이브러리 추가
 from playsound import playsound 
 
@@ -24,6 +25,8 @@ WARNING_SOUND_PATH = "/Users/hanjiho/Desktop/warning_sound.wav"
 
 # 경고 각도 임계값
 ANGLE_THRESHOLD = 30 
+# 장시간 눈 감기 임계값 (2초)
+CLOSED_THRESHOLD_SEC = 2.0 
 # 측면 얼굴 인식을 위해 여백을 넉넉히 줌
 EYE_CROP_PADDING = 40 
 
@@ -106,8 +109,11 @@ if not cap.isOpened():
 
 blink_flag = False
 blink_count = 0
-# ⚠️ 사운드 중복 재생 방지를 위한 플래그 추가
+# ⚠️ 사운드 중복 재생 방지를 위한 플래그
 is_warning_active = False 
+# ⚠️ 장시간 눈 감기 감지를 위한 타이머 변수 추가
+closed_start_time = None
+is_long_closed_warning_active = False # 장시간 감기 경고 플래그
 
 print("웹캠 실행 중... (ESC 키를 누르면 종료됩니다)")
 
@@ -198,11 +204,11 @@ while True:
             # -------------------------------------------------------
             # 🆕 기하학적 Head Pose Estimation (PnP 대체)
             # -------------------------------------------------------
-            p33  = np.array([landmarks[33].x * w,  landmarks[33].y * h])  # 왼쪽 눈 끝
-            p263 = np.array([landmarks[263].x * w, landmarks[263].y * h]) # 오른쪽 눈 끝
-            p1   = np.array([landmarks[1].x * w,   landmarks[1].y * h])   # 코 끝
-            p61  = np.array([landmarks[61].x * w,  landmarks[61].y * h])  # 입 왼쪽
-            p291 = np.array([landmarks[291].x * w, landmarks[291].y * h]) # 입 오른쪽
+            p33  = np.array([landmarks[33].x * w,  landmarks[33].y * h])
+            p263 = np.array([landmarks[263].x * w, landmarks[263].y * h])
+            p1   = np.array([landmarks[1].x * w,   landmarks[1].y * h])
+            p61  = np.array([landmarks[61].x * w,  landmarks[61].y * h])
+            p291 = np.array([landmarks[291].x * w, landmarks[291].y * h])
 
             # [1] Roll (기울기)
             dy = p263[1] - p33[1]
@@ -249,7 +255,10 @@ while True:
             features_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(DEVICE)
         
     else:
+        # 얼굴 감지 실패 시 타이머 초기화 및 경고 리셋
         face_detected = False
+        closed_start_time = None
+        is_long_closed_warning_active = False
 
     # --- 4. 모델 추론 (깜빡임) ---
     pred = 1 
@@ -258,48 +267,73 @@ while True:
             blink_out = model(img_tensor, features_tensor)
             pred = torch.argmax(blink_out, dim=1).item() 
 
-    # --- 5. 깜빡임 카운트 ---
-    if pred == 0: 
+    # --- 5. 깜빡임 카운트 및 장시간 감기 타이머 관리 ---
+    if pred == 0: # Closed
         if not blink_flag:
             blink_flag = True
-    else: 
+        
+        # ⚠️ 눈 감기 시작 시간 기록
+        if closed_start_time is None:
+            closed_start_time = time.time()
+            
+    else: # Open
         if blink_flag:
             blink_flag = False
             blink_count += 1
+            
+        # ⚠️ 눈 뜨면 타이머와 장시간 경고 리셋
+        closed_start_time = None
+        is_long_closed_warning_active = False
+
 
     # -------------------------------------------------------
-    ## 🚨 --- 7. 경고 시스템 및 사운드 (추가된 부분) ---
+    ## 🚨 --- 7. 포즈 경고 시스템 ---
     # -------------------------------------------------------
-    warning_message = ""
-    warning_color = (0, 0, 0) # 기본 (검은색)
+    # 포즈 경고 플래그 및 메시지 초기화
+    pose_warning_message = ""
+    pose_warning_color = (0, 0, 0)
     
-    is_unstable = abs(head_pitch) > ANGLE_THRESHOLD or abs(head_roll) > ANGLE_THRESHOLD
+    is_unstable_pose = abs(head_pitch) > ANGLE_THRESHOLD or abs(head_roll) > ANGLE_THRESHOLD
     
-    if is_unstable:
-        warning_message = f"warning: Danger angle exceeded (Pitch/Roll > {ANGLE_THRESHOLD}°)"
-        warning_color = (0, 0, 255) # 빨간색 경고
+    if is_unstable_pose:
+        pose_warning_message = f"경고: 위험 각도 초과! ({ANGLE_THRESHOLD}°)"
+        pose_warning_color = (0, 0, 255) # 빨간색
+    # -------------------------------------------------------
+
+
+    # -------------------------------------------------------
+    ## 👁️ --- 8. 장시간 눈 감기 경고 (추가된 부분) ---
+    # -------------------------------------------------------
+    long_closed_warning_message = ""
+    
+    if closed_start_time is not None:
+        closed_duration = time.time() - closed_start_time
         
-        # 🚨 사운드 재생: is_warning_active가 False일 때만 재생 (반복 방지)
+        if closed_duration >= CLOSED_THRESHOLD_SEC:
+            is_long_closed_warning_active = True
+            long_closed_warning_message = f"경고: 장시간 눈 감음! ({closed_duration:.1f}초)"
+            
+    # 최종 경고 결정 및 사운드 재생
+    # 두 경고 중 하나라도 활성화되면 is_warning_active 플래그를 관리하여 사운드 재생
+    final_warning_active = is_unstable_pose or is_long_closed_warning_active
+    
+    if final_warning_active:
         if not is_warning_active:
             is_warning_active = True
             try:
-                # playsound는 비동기(non-blocking)를 지원하지 않으므로, 
-                # 짧은 소리 파일만 사용하거나 새로운 쓰레드로 실행하는 것이 좋으나, 
-                # 가장 간단한 형태로 구현합니다.
+                # 경고음 재생
                 playsound(WARNING_SOUND_PATH, block=False)
                 print("경고음 재생됨!")
             except Exception as e:
-                print(f"경고음 재생 오류: {e} (파일 경로를 확인하세요)")
+                # print(f"경고음 재생 오류: {e} (파일 경로를 확인하세요)")
+                pass # 오류 메시지 출력을 줄임
     else:
-        # 안정 범위로 돌아오면 플래그 초기화
+        # 모든 경고가 비활성화되면 플래그 초기화
         is_warning_active = False 
 
-    # 화면 우측 상단에 경고 메시지 표시
-    cv2.putText(frame, warning_message, (w - 500, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, warning_color, 2)
-    # -------------------------------------------------------
-
-
-    # --- 6. 화면 표시 ---
+    # --- 9. 화면 표시 ---
+    
+    # 1. 상태 및 카운트
     if not face_detected:
         status_text = "No Face"
         status_color = (0, 0, 255)
@@ -307,17 +341,23 @@ while True:
         status_text = "Closed" if pred == 0 else "Open"
         status_color = (0, 0, 255) if pred == 0 else (0, 255, 0)
     
-    # 텍스트 표시 UI
     cv2.putText(frame, f"Status: {status_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
     cv2.putText(frame, f"Blinks: {blink_count}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
     
-    # 얼굴이 감지되면 항상 포즈 정보 표시
-    info_color = (0, 255, 255) if face_detected else (128, 128, 128)
-    
+    # 2. 포즈 정보
+    info_color = (0, 255, 255) if face_detected and not is_unstable_pose else (128, 128, 128)
     cv2.putText(frame, f"Yaw(L/R): {head_yaw:.1f}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, info_color, 2)
     cv2.putText(frame, f"Pitch(U/D): {head_pitch:.1f}", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, info_color, 2)
     cv2.putText(frame, f"Roll(Tilt): {head_roll:.1f}", (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, info_color, 2)
     cv2.putText(frame, f"Gaze: {gaze_text}", (10, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, info_color, 2)
+
+    # 3. 경고 메시지 (포즈 경고와 눈 감기 경고를 분리하여 표시)
+    if pose_warning_message:
+        cv2.putText(frame, pose_warning_message, (w - 500, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, pose_warning_color, 2)
+    
+    if long_closed_warning_message:
+        # 눈 감기 경고는 포즈 경고 아래에 표시
+        cv2.putText(frame, long_closed_warning_message, (w - 500, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2) # 주황색 (BGR)
 
     cv2.imshow("Eye Blink & Geometry Pose", frame)
     if cv2.waitKey(1) & 0xFF == 27: 
