@@ -107,3 +107,22 @@ The model is primarily trained on the **CEW Dataset**:
    - Head Yaw/Pitch  
 
 ---
+
+---
+
+## 📸 Results
+
+### 🔹 Real-Time Inference Example
+<img width="304" height="181" alt="image" src="https://github.com/user-attachments/assets/bc893b06-2c1f-4d14-adfd-2a31908e7357" />
+
+
+---
+
+### 🔹 Final Blink Detection Graph
+
+<img width="310" height="192" alt="image" src="https://github.com/user-attachments/assets/e9814dfa-f4db-445b-b09a-af605560c4db" />
+
+
+- Blue curve: Eye movement signal over time  
+- Threshold (0 / 1): Blink classification boundary  
+- Output: 0 → Closed, 1 → Open
